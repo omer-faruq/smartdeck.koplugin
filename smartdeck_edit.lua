@@ -15,6 +15,11 @@ local TextViewer = require("ui/widget/textviewer")
 local NetworkMgr = require("ui/network/manager")
 local Trapper = require("ui/trapper")
 local Device = require("device")
+local Button = require("ui/widget/button")
+local HorizontalSpan = require("ui/widget/horizontalspan")
+local Blitbuffer = require("ffi/blitbuffer")
+
+local Screen = Device.screen
 
 local DB = require("smartdeck_db")
 local Enrich = require("smartdeck_enrich")
@@ -268,6 +273,26 @@ local function showCardActionDialog(plugin, card, on_refresh)
     UIManager:show(dialog)
 end
 
+-- Case-insensitive substring match across the most user-facing text fields.
+local function matchesFilter(card, query)
+    if not query or query == "" then return true end
+    query = query:lower()
+    local haystacks = {
+        card.phrase or "",
+        card.meaning or "",
+        card.user_note or "",
+        card.word_type or "",
+        card.pronunciation or "",
+        card.sentence or "",
+    }
+    for _, h in ipairs(haystacks) do
+        if h ~= "" and h:lower():find(query, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 -- Public: open the card list screen.
 -- @param plugin   SmartDeck plugin instance
 -- @param book_id  nil = all books
@@ -275,28 +300,89 @@ end
 function Edit.showList(plugin, book_id, title)
     local screen = Device.screen
     local menu
+    -- Session-only filter state. Intentionally NOT persisted: reopening the
+    -- list from the main menu always starts with no filter.
+    local filter_text = ""
+
+    local final_title = title or _("SmartDeck cards")
+
+    local function currentTitle()
+        if filter_text ~= "" then
+            return string.format("%s  [%s]", final_title, filter_text)
+        end
+        return final_title
+    end
+
     local function buildItems()
         local cards = DB.listCards(book_id, false)
         local items = {}
         for _, card in ipairs(cards) do
-            items[#items + 1] = {
-                text = buildCardLabel(card),
-                card = card,
-            }
+            if matchesFilter(card, filter_text) then
+                items[#items + 1] = {
+                    text = buildCardLabel(card),
+                    card = card,
+                }
+            end
         end
         if #items == 0 then
-            items[#items + 1] = { text = _("(no cards)"), dim = true }
+            if filter_text ~= "" then
+                items[#items + 1] = { text = _("(no cards match filter)"), dim = true }
+            else
+                items[#items + 1] = { text = _("(no cards)"), dim = true }
+            end
         end
         return items
     end
 
     local function refresh()
         if menu and menu.switchItemTable then
-            menu:switchItemTable(menu.title, buildItems())
+            menu:switchItemTable(currentTitle(), buildItems())
         end
     end
 
-    local final_title = title or _("SmartDeck cards")
+    local function showFilterDialog()
+        local dialog
+        dialog = InputDialog:new{
+            title = _("Filter cards"),
+            description = _("Match phrase, meaning, note, word type, pronunciation or sentence."),
+            input = filter_text,
+            input_hint = _("Filter text"),
+            buttons = { {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    background = Blitbuffer.COLOR_WHITE,
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Clear filter"),
+                    background = Blitbuffer.COLOR_WHITE,
+                    callback = function()
+                        UIManager:close(dialog)
+                        filter_text = ""
+                        refresh()
+                    end,
+                },
+                {
+                    text = _("OK"),
+                    is_enter_default = true,
+                    background = Blitbuffer.COLOR_WHITE,
+                    callback = function()
+                        local raw = dialog:getInputText() or ""
+                        raw = raw:gsub("^%s+", ""):gsub("%s+$", "")
+                        UIManager:close(dialog)
+                        filter_text = raw
+                        refresh()
+                    end,
+                },
+            } },
+        }
+        UIManager:show(dialog)
+        dialog:onShowKeyboard()
+    end
+
     menu = Menu:new{
         title = final_title,
         item_table = buildItems(),
@@ -324,6 +410,25 @@ function Edit.showList(plugin, book_id, title)
             })
         end
         return true
+    end
+
+    -- Inject a "Filter" button into the bottom icon bar of the menu, next to
+    -- the page navigation chevrons. Mirrors the rssreader "More" button
+    -- pattern.
+    if menu.page_info then
+        local spacer = HorizontalSpan:new{ width = Screen:scaleBySize(16) }
+        local filter_button = Button:new{
+            text = _("Filter"),
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = 0,
+            show_parent = menu.show_parent or menu,
+            callback = showFilterDialog,
+        }
+        table.insert(menu.page_info, spacer)
+        table.insert(menu.page_info, filter_button)
+        if menu.page_info.resetLayout then
+            menu.page_info:resetLayout()
+        end
     end
 
     UIManager:show(menu)
