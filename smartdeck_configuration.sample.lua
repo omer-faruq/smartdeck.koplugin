@@ -56,6 +56,47 @@ local CONFIGURATION = {
                 max_tokens = 1024,
             },
         },
+
+        -- Anthropic Claude. Uses the Messages API (smartdeck_providers/anthropic.lua).
+        anthropic = {
+            visible = true,
+            model = "claude-3-5-haiku-latest",
+            base_url = "https://api.anthropic.com/v1/messages",
+            api_key = "your-anthropic-api-key",
+            additional_parameters = {
+                max_tokens = 1024,
+                temperature = 0.3,
+                anthropic_version = "2023-06-01",
+            },
+        },
+
+        -- Google Gemini. Uses the native generateContent endpoint
+        -- (smartdeck_providers/gemini.lua). `base_url` must end with a slash.
+        gemini = {
+            visible = true,
+            model = "gemini-2.0-flash",
+            base_url = "https://generativelanguage.googleapis.com/v1beta/models/",
+            api_key = "your-gemini-api-key",
+            additional_parameters = {
+                temperature = 0.3,
+                maxOutputTokens = 1024,
+            },
+        },
+
+        -- Ollama using its native /api/chat endpoint
+        -- (smartdeck_providers/ollama.lua).
+        ollama = {
+            visible = true,
+            model = "llama3.1",
+            base_url = "http://127.0.0.1:11434/api/chat",
+            api_key = "", -- leave empty unless your server needs one
+            additional_parameters = {
+                options = {
+                    temperature = 0.3,
+                    num_predict = 1024,
+                },
+            },
+        },
     },
 }
 
