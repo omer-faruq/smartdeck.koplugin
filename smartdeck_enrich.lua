@@ -249,6 +249,24 @@ end
 
 -- ── Cancellable bulk enrichment ───────────────────────────────────────────
 
+-- Retry policy for transient provider errors (rate-limits, network blips,
+-- timeouts). Most failures observed in practice succeed on the first or
+-- second retry, so we keep the waits short to stay responsive.
+-- Number of entries in BACKOFF_SECONDS == max retries after the initial try.
+local BACKOFF_SECONDS = { 1.5, 3.0 }
+local MAX_ATTEMPTS = #BACKOFF_SECONDS + 1
+
+-- Persist a non-fatal in-flight error on the card without flipping the status
+-- to STATUS_ERROR; this keeps the card eligible for an upcoming retry while
+-- still logging what went wrong on the last attempt.
+local function recordTransientError(card, err)
+    if not card or not card.id then return end
+    DB.applyEnrichment(card.id, {
+        status = DB.STATUS_PENDING,
+        error = err or "",
+    })
+end
+
 function Enrich.bulkEnrich(plugin, cards, on_finished)
     if not cards or #cards == 0 then
         UIManager:show(InfoMessage:new{
@@ -266,16 +284,21 @@ function Enrich.bulkEnrich(plugin, cards, on_finished)
     local cancelled = false
     local progress_widget
 
-    local function showProgress(idx, phrase)
+    -- `extra` is an optional suffix shown below the phrase (e.g. retry info).
+    local function showProgress(idx, phrase, extra)
         if progress_widget then
             progress_widget.dismiss_callback = nil
             UIManager:close(progress_widget)
             progress_widget = nil
         end
         local text = string.format(
-            _("Fetching card %d of %d…\n\n\"%s\"\n\nTap outside to cancel."),
+            _("Fetching card %d of %d…\n\n\"%s\""),
             idx, total, phrase or ""
         )
+        if extra and extra ~= "" then
+            text = text .. "\n\n" .. extra
+        end
+        text = text .. "\n\n" .. _("Tap outside to cancel.")
         progress_widget = InfoMessage:new{
             text = text,
             timeout = nil,
@@ -301,12 +324,73 @@ function Enrich.bulkEnrich(plugin, cards, on_finished)
         if on_finished then on_finished(succeeded, failed) end
     end
 
-    local function processNext()
+    local processNext -- forward declaration
+
+    local function cancelledMessage()
+        return string.format(
+            _("Cancelled. %d succeeded, %d failed, %d skipped."),
+            succeeded, failed, total - succeeded - failed
+        )
+    end
+
+    -- Attempt enrichment of the current card; retry up to MAX_ATTEMPTS-1 times
+    -- with a short backoff before giving up. Cancellation is honoured both
+    -- during the network call and while waiting between retries.
+    local function runAttempt(card, attempt)
         if cancelled then
-            finalize(string.format(
-                _("Cancelled. %d succeeded, %d failed, %d skipped."),
-                succeeded, failed, total - succeeded - failed
-            ))
+            finalize(cancelledMessage())
+            return
+        end
+
+        local attempt_note
+        if attempt > 1 then
+            attempt_note = string.format(
+                _("Retrying (%d/%d)…"), attempt, MAX_ATTEMPTS
+            )
+        end
+        showProgress(index, card.phrase or "", attempt_note)
+
+        -- Run the network call on the next tick so the UI can paint.
+        UIManager:scheduleIn(0.05, function()
+            local ok, err = Enrich.enrichAndSave(plugin, card)
+            if cancelled then
+                finalize(cancelledMessage())
+                return
+            end
+            if ok then
+                succeeded = succeeded + 1
+                UIManager:scheduleIn(0.05, processNext)
+                return
+            end
+
+            if attempt < MAX_ATTEMPTS then
+                local wait = BACKOFF_SECONDS[attempt] or 2.0
+                logger.info("smartdeck: retry", attempt + 1, "of", MAX_ATTEMPTS,
+                    "for", card.phrase, "after", wait, "s; err=", err)
+                -- Don't leave the card marked as STATUS_ERROR while we're
+                -- still going to try again.
+                recordTransientError(card, err)
+                card.ai_status = DB.STATUS_PENDING
+                card.ai_error = err or ""
+                showProgress(index, card.phrase or "", string.format(
+                    _("Retry %d/%d in %.1fs…\n(%s)"),
+                    attempt + 1, MAX_ATTEMPTS, wait, err or _("unknown error")
+                ))
+                UIManager:scheduleIn(wait, function()
+                    runAttempt(card, attempt + 1)
+                end)
+            else
+                failed = failed + 1
+                logger.warn("smartdeck: enrichment failed after",
+                    MAX_ATTEMPTS, "attempts for", card.phrase, err)
+                UIManager:scheduleIn(0.05, processNext)
+            end
+        end)
+    end
+
+    processNext = function()
+        if cancelled then
+            finalize(cancelledMessage())
             return
         end
         index = index + 1
@@ -316,27 +400,7 @@ function Enrich.bulkEnrich(plugin, cards, on_finished)
             ))
             return
         end
-        local card = cards[index]
-        showProgress(index, card.phrase or "")
-
-        -- Run the enrichment on next tick so the UI gets a chance to paint.
-        UIManager:scheduleIn(0.05, function()
-            local ok, err = Enrich.enrichAndSave(plugin, card)
-            if cancelled then
-                finalize(string.format(
-                    _("Cancelled. %d succeeded, %d failed, %d skipped."),
-                    succeeded, failed, total - succeeded - failed
-                ))
-                return
-            end
-            if ok then
-                succeeded = succeeded + 1
-            else
-                failed = failed + 1
-                logger.warn("smartdeck: enrichment failed for", card.phrase, err)
-            end
-            UIManager:scheduleIn(0.05, processNext)
-        end)
+        runAttempt(cards[index], 1)
     end
 
     processNext()
