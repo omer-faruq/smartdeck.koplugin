@@ -4,8 +4,8 @@ AI-powered flashcard plugin for KOReader.
 
 Select a word or phrase from the book (via the highlight menu) or from the
 dictionary popup, and SmartDeck will store the card into an SQLite database.
-When an internet connection is available, the plugin will use an
-OpenAI-compatible AI provider to enrich every card with:
+When an internet connection is available, the plugin will use an AI provider
+to enrich every card with:
 
 * Pronunciation / phonetics
 * Word type (part of speech)
@@ -23,21 +23,36 @@ content, clear it for a later refetch, or refetch immediately.
 
 Copy `smartdeck_configuration.sample.lua` to `smartdeck_configuration.lua` and
 fill in the API key(s) for your provider. Multiple named providers are
-supported (e.g. `openai`, `openai_grok`) – name-based dispatch selects the
-handler (the part before the first `_`) in exactly the same way as the
-AI Assistant plugin does.
+supported (e.g. `openai`, `openai_grok`, `anthropic`, `gemini`) – name-based
+dispatch selects the handler (the part before the first `_`) in exactly the
+same way as the AI Assistant plugin does.
 
-Only OpenAI-compatible providers are shipped by default. The
-`smartdeck_providers` folder is structured so that adding new handlers
-(Anthropic, Gemini, …) is straightforward.
+### Supported providers
+
+* **OpenAI-compatible** (`openai` handler): OpenAI, Groq, xAI Grok, DeepSeek,
+  Mistral, OpenRouter, Azure OpenAI, local Ollama servers using the
+  `/v1/chat/completions` endpoint, and any other provider that implements the
+  OpenAI chat completions format.
+* **Anthropic** (`anthropic` handler): Claude models via the Messages API.
+* **Google Gemini** (`gemini` handler): Gemini models via the native
+  `generateContent` endpoint.
+* **Ollama** (`ollama` handler): Ollama's native `/api/chat` endpoint for local
+  models.
+
+See `smartdeck_configuration.sample.lua` for configuration examples.
 
 ## Main menu
 
 * **Study** — open the spaced-repetition review screen.
-* **Cards** — browse, edit, or delete cards (per current book or across all
-  books).
+* **Cards for this book** / **All cards** — browse, edit, or delete cards.
+  Each list includes a **Filter** button in the bottom toolbar for quick
+  case-insensitive search across phrase, meaning, note, word type,
+  pronunciation, and sentence fields. Filter is session-only (cleared when
+  reopening the list).
 * **Fetch missing info** — cancellable bulk enrichment of cards that don't
-  yet have AI data; tap outside the progress popup to stop.
+  yet have AI data. Failed requests are automatically retried up to 3 times
+  with exponential backoff (1.5s, 3s) to handle transient network errors and
+  rate limits. Tap outside the progress popup to cancel.
 * **Import from Vocabulary Builder** — imports words collected by the built-in
   Vocabulary Builder into the current book's deck.
 * **Settings** — provider selection, target language, context-word counts,
