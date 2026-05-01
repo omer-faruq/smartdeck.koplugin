@@ -444,6 +444,74 @@ function Settings.show(plugin)
                 end,
             },
             {
+                text = _("Algorithm type"),
+                mandatory = shortMandatory(plugin.settings:readSetting("algorithm_type", "scheduled") == "adaptive" and _("Adaptive") or _("Scheduled")),
+                keep_menu_open = true,
+                sub_item_table = {
+                    {
+                        text = _("Scheduled (Classic SM-2)"),
+                        checked_func = function()
+                            return plugin.settings:readSetting("algorithm_type", "scheduled") == "scheduled"
+                        end,
+                        callback = function()
+                            plugin.settings:saveSetting("algorithm_type", "scheduled")
+                            plugin.settings:flush()
+                            if menu then menu:switchItemTable(title, buildItems()) end
+                        end,
+                    },
+                    {
+                        text = _("Adaptive (Time-Based)"),
+                        checked_func = function()
+                            return plugin.settings:readSetting("algorithm_type", "scheduled") == "adaptive"
+                        end,
+                        callback = function()
+                            plugin.settings:saveSetting("algorithm_type", "adaptive")
+                            plugin.settings:flush()
+                            if menu then menu:switchItemTable(title, buildItems()) end
+                        end,
+                    },
+                },
+            },
+            {
+                text = _("Minimum interval (days)"),
+                mandatory = function()
+                    local val = tonumber(plugin.settings:readSetting("min_interval_days", 0)) or 0
+                    return val == 0 and _("Default") or (tostring(val) .. "d")
+                end,
+                keep_menu_open = true,
+                callback = function()
+                    local current = tonumber(plugin.settings:readSetting("min_interval_days", 0)) or 0
+                    showNumberInput(
+                        _("Minimum interval (days)"),
+                        _("Minimum interval for review cards. 0 = Anki-style default."),
+                        current, 0,
+                        function(value)
+                            plugin.settings:saveSetting("min_interval_days", value)
+                            plugin.settings:flush()
+                            if menu then menu:switchItemTable(title, buildItems()) end
+                        end
+                    )
+                end,
+            },
+            {
+                text = _("Maximum interval (days)"),
+                mandatory = tostring(tonumber(plugin.settings:readSetting("max_interval_days", 365)) or 365) .. "d",
+                keep_menu_open = true,
+                callback = function()
+                    local current = tonumber(plugin.settings:readSetting("max_interval_days", 365)) or 365
+                    showNumberInput(
+                        _("Maximum interval (days)"),
+                        _("Maximum interval cap for review cards."),
+                        current, 1,
+                        function(value)
+                            plugin.settings:saveSetting("max_interval_days", value)
+                            plugin.settings:flush()
+                            if menu then menu:switchItemTable(title, buildItems()) end
+                        end
+                    )
+                end,
+            },
+            {
                 text = _("Study only enriched cards"),
                 mandatory = boolMark(require_enriched),
                 keep_menu_open = true,

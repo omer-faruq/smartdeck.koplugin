@@ -470,7 +470,9 @@ function StudyScreen:onShowOrNext()
         self.card_full_text = buildSide(self.current_card, back_state, true):gsub("\n", "\n\n")
         self.card_widget:setText(back_text)
         local min_interval = plugin and (tonumber(plugin:readSetting("min_interval_days", 0)) or 0) or 0
-        local previews = DB.previewIntervals(self.current_card, nil, min_interval)
+        local max_interval = plugin and (tonumber(plugin:readSetting("max_interval_days", 365)) or 365) or 365
+        local algorithm_type = plugin and (plugin:readSetting("algorithm_type", "scheduled") or "scheduled") or "scheduled"
+        local previews = DB.previewIntervals(self.current_card, nil, min_interval, max_interval, algorithm_type)
         self:updateRatingLabels(previews)
         self:setShowButtonVisible(false)
         self:setRatingButtonsEnabled(true)
@@ -506,7 +508,9 @@ function StudyScreen:onRate(rating)
     local is_new_card = (self.current_card.reps == 0 and self.current_card.interval == 0)
     local plugin = self.plugin
     local min_interval = plugin and (tonumber(plugin:readSetting("min_interval_days", 0)) or 0) or 0
-    DB.updateCardScheduling(self.current_card, rating, nil, min_interval)
+    local max_interval = plugin and (tonumber(plugin:readSetting("max_interval_days", 365)) or 365) or 365
+    local algorithm_type = plugin and (plugin:readSetting("algorithm_type", "scheduled") or "scheduled") or "scheduled"
+    DB.updateCardScheduling(self.current_card, rating, nil, min_interval, max_interval, algorithm_type)
     if is_new_card and self.book_id then
         DB.incrementDailyNewCardsCount(self.book_id)
     end

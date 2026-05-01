@@ -10,7 +10,7 @@ local logger = require("logger")
 
 local DB = {}
 
-local DB_SCHEMA_VERSION = 1
+local DB_SCHEMA_VERSION = 2
 local DB_DIRECTORY = ffiUtil.joinPath(DataStorage:getDataDir(), "smartdeck")
 local DB_PATH = ffiUtil.joinPath(DB_DIRECTORY, "smartdeck.sqlite3")
 
@@ -116,11 +116,23 @@ function DB.init()
     local conn = openConnection()
     local current_version = tonumber(conn:rowexec("PRAGMA user_version;")) or 0
     if current_version < DB_SCHEMA_VERSION then
-        conn:exec("PRAGMA writable_schema = ON;")
-        conn:exec("DELETE FROM sqlite_master WHERE type IN ('table','index','trigger');")
-        conn:exec("PRAGMA writable_schema = OFF;")
-        conn:exec("VACUUM;")
-        execStatements(conn, SCHEMA_STATEMENTS)
+        if current_version == 0 then
+            conn:exec("PRAGMA writable_schema = ON;")
+            conn:exec("DELETE FROM sqlite_master WHERE type IN ('table','index','trigger');")
+            conn:exec("PRAGMA writable_schema = OFF;")
+            conn:exec("VACUUM;")
+            execStatements(conn, SCHEMA_STATEMENTS)
+        else
+            execStatements(conn, SCHEMA_STATEMENTS)
+        end
+        if current_version < 2 then
+            local ok, err = pcall(function()
+                conn:exec("ALTER TABLE cards ADD COLUMN last_reviewed_at INTEGER DEFAULT NULL;")
+            end)
+            if not ok and not err:match("duplicate column name") then
+                logger.warn("smartdeck: failed to add last_reviewed_at column:", err)
+            end
+        end
         conn:exec("PRAGMA user_version = " .. DB_SCHEMA_VERSION .. ";")
     else
         execStatements(conn, SCHEMA_STATEMENTS)
@@ -302,6 +314,8 @@ local function mapCardRow(row)
         due = coerceNumber(row.due, os.time()),
         reps = coerceNumber(row.reps, 0),
         lapses = coerceNumber(row.lapses, 0),
+        updated_at = coerceNumber(row.updated_at, os.time()),
+        last_reviewed_at = coerceNumber(row.last_reviewed_at, nil),
     }
 end
 
@@ -309,6 +323,7 @@ local CARD_SELECT_COLUMNS = table.concat({
     "id", "book_id", "phrase", "sentence", "ai_context", "display_context",
     "pronunciation", "meaning", "word_type", "examples", "user_note",
     "ai_status", "ai_error", "ease", "interval", "due", "reps", "lapses",
+    "updated_at", "last_reviewed_at",
 }, ", ")
 
 local function fetchSingle(conn, sql)
@@ -496,13 +511,15 @@ end
 
 -- ── SM-2 scheduling (mirrors phrasedeck) ──────────────────────────────────
 
-local function computeScheduling(card, rating, now_ts, min_interval_days)
+local function computeScheduling(card, rating, now_ts, min_interval_days, max_interval_days, algorithm_type)
     local ease = card.ease or 2.5
     local interval = card.interval or 0
     local reps = card.reps or 0
     local lapses = card.lapses or 0
     local now = now_ts or os.time()
     local min_interval_multiplier = tonumber(min_interval_days) or 0
+    local max_interval = tonumber(max_interval_days) or 365
+    local algo = algorithm_type or "scheduled"
 
     local is_new = (interval == 0) and (reps == 0)
 
@@ -538,40 +555,96 @@ local function computeScheduling(card, rating, now_ts, min_interval_days)
         end
     end
 
-    if rating == "again" then
-        reps = 0
-        lapses = lapses + 1
-        ease = math.max(1.3, ease - 0.2)
-        if min_interval_multiplier > 0 then
-            interval = min_interval_multiplier
+    if algo == "adaptive" then
+        local last_review = card.last_reviewed_at
+        if not last_review or last_review == 0 then
+            -- Fallback for migrated cards: estimate last review time from due and interval
+            local interval_seconds = (card.interval or 0) * 86400
+            last_review = (card.due or now) - interval_seconds
+            -- Ensure it's not in the future
+            if last_review > now then
+                last_review = now
+            end
+        end
+        
+        local actual_gap_seconds = now - last_review
+        local actual_gap_days = actual_gap_seconds / 86400
+        
+        local scheduled_interval = card.interval or 1
+        if actual_gap_days < scheduled_interval then
+            actual_gap_days = math.max(actual_gap_days, scheduled_interval * 0.5)
+        end
+        
+        if rating == "again" then
+            reps = 0
+            lapses = lapses + 1
+            ease = math.max(1.3, ease - 0.2)
+            if min_interval_multiplier > 0 then
+                interval = min_interval_multiplier
+                return ease, interval, reps, lapses, now + interval * 86400
+            end
+            interval = 0
+            return ease, interval, reps, lapses, now + 10 * 60
+        elseif rating == "hard" then
+            reps = reps + 1
+            ease = math.max(1.3, ease - 0.15)
+            interval = actual_gap_days * 1.2
+            interval = math.max(interval, min_interval_multiplier > 0 and min_interval_multiplier or 1)
+            interval = math.min(interval, max_interval)
+            return ease, interval, reps, lapses, now + interval * 86400
+        elseif rating == "good" then
+            reps = reps + 1
+            interval = actual_gap_days * ease
+            interval = math.max(interval, min_interval_multiplier > 0 and min_interval_multiplier or 1)
+            interval = math.min(interval, max_interval)
+            return ease, interval, reps, lapses, now + interval * 86400
+        elseif rating == "easy" then
+            reps = reps + 1
+            ease = ease + 0.15
+            interval = actual_gap_days * ease * 1.3
+            interval = math.max(interval, min_interval_multiplier > 0 and min_interval_multiplier or 1)
+            interval = math.min(interval, max_interval)
             return ease, interval, reps, lapses, now + interval * 86400
         end
-        interval = 0
-        return ease, interval, reps, lapses, now + 10 * 60
-    elseif rating == "hard" then
-        reps = reps + 1
-        ease = math.max(1.3, ease - 0.15)
-        if interval < 1 then interval = 1 end
-        interval = interval * 1.2
-        if min_interval_multiplier > 0 then
-            interval = math.max(interval, min_interval_multiplier * 1.5)
+    else
+        if rating == "again" then
+            reps = 0
+            lapses = lapses + 1
+            ease = math.max(1.3, ease - 0.2)
+            if min_interval_multiplier > 0 then
+                interval = min_interval_multiplier
+                return ease, interval, reps, lapses, now + interval * 86400
+            end
+            interval = 0
+            return ease, interval, reps, lapses, now + 10 * 60
+        elseif rating == "hard" then
+            reps = reps + 1
+            ease = math.max(1.3, ease - 0.15)
+            if interval < 1 then interval = 1 end
+            interval = interval * 1.2
+            if min_interval_multiplier > 0 then
+                interval = math.max(interval, min_interval_multiplier * 1.5)
+            end
+            interval = math.min(interval, max_interval)
+            return ease, interval, reps, lapses, now + interval * 86400
+        elseif rating == "good" then
+            reps = reps + 1
+            if interval == 0 then interval = 1 else interval = interval * ease end
+            if min_interval_multiplier > 0 then
+                interval = math.max(interval, min_interval_multiplier * 2)
+            end
+            interval = math.min(interval, max_interval)
+            return ease, interval, reps, lapses, now + interval * 86400
+        elseif rating == "easy" then
+            reps = reps + 1
+            ease = ease + 0.15
+            if interval == 0 then interval = 3 else interval = interval * ease * 1.3 end
+            if min_interval_multiplier > 0 then
+                interval = math.max(interval, min_interval_multiplier * 4)
+            end
+            interval = math.min(interval, max_interval)
+            return ease, interval, reps, lapses, now + interval * 86400
         end
-        return ease, interval, reps, lapses, now + interval * 86400
-    elseif rating == "good" then
-        reps = reps + 1
-        if interval == 0 then interval = 1 else interval = interval * ease end
-        if min_interval_multiplier > 0 then
-            interval = math.max(interval, min_interval_multiplier * 2)
-        end
-        return ease, interval, reps, lapses, now + interval * 86400
-    elseif rating == "easy" then
-        reps = reps + 1
-        ease = ease + 0.15
-        if interval == 0 then interval = 3 else interval = interval * ease * 1.3 end
-        if min_interval_multiplier > 0 then
-            interval = math.max(interval, min_interval_multiplier * 4)
-        end
-        return ease, interval, reps, lapses, now + interval * 86400
     end
 
     return ease, interval, reps, lapses, card.due or now
@@ -682,13 +755,22 @@ function DB.fetchNextDueCard(book_id, now_ts, randomize, daily_new_limit, requir
     end)
 end
 
-function DB.previewIntervals(card, now_ts, min_interval_days)
+function DB.previewIntervals(card, now_ts, min_interval_days, max_interval_days, algorithm_type)
     if not card or not card.id then return nil end
     local now = now_ts or os.time()
     local result = {}
     local ratings = { "again", "hard", "good", "easy" }
+    
+    local preview_card = {}
+    for k, v in pairs(card) do
+        preview_card[k] = v
+    end
+    if algorithm_type == "adaptive" then
+        preview_card.last_reviewed_at = now
+    end
+    
     for _, rating in ipairs(ratings) do
-        local ease, interval, reps, lapses, due = computeScheduling(card, rating, now, min_interval_days)
+        local ease, interval, reps, lapses, due = computeScheduling(preview_card, rating, now, min_interval_days, max_interval_days, algorithm_type)
         result[rating] = {
             ease = ease, interval = interval, reps = reps, lapses = lapses,
             due = due, label = formatDelta(due - now),
@@ -697,17 +779,17 @@ function DB.previewIntervals(card, now_ts, min_interval_days)
     return result
 end
 
-function DB.updateCardScheduling(card, rating, now_ts, min_interval_days)
+function DB.updateCardScheduling(card, rating, now_ts, min_interval_days, max_interval_days, algorithm_type)
     if not card or not card.id then return nil end
     DB.init()
     local now = now_ts or os.time()
     local new_ease, new_interval, new_reps, new_lapses, new_due =
-        computeScheduling(card, rating, now, min_interval_days)
+        computeScheduling(card, rating, now, min_interval_days, max_interval_days, algorithm_type)
     withConnection(function(conn)
         local stmt = conn:prepare([[UPDATE cards
-            SET ease = ?, interval = ?, due = ?, reps = ?, lapses = ?, updated_at = ?
+            SET ease = ?, interval = ?, due = ?, reps = ?, lapses = ?, updated_at = ?, last_reviewed_at = ?
             WHERE id = ?;]])
-        stmt:bind(new_ease, new_interval, new_due, new_reps, new_lapses, now, card.id)
+        stmt:bind(new_ease, new_interval, new_due, new_reps, new_lapses, now, now, card.id)
         stmt:step()
         stmt:close()
     end)
@@ -716,6 +798,7 @@ function DB.updateCardScheduling(card, rating, now_ts, min_interval_days)
     card.due = new_due
     card.reps = new_reps
     card.lapses = new_lapses
+    card.last_reviewed_at = now
     return card
 end
 
