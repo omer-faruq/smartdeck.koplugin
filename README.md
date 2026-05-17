@@ -65,5 +65,9 @@ See `smartdeck_configuration.sample.lua` for configuration examples.
 * A "SmartDeck" button is injected into the dictionary popup; tap it to send
   the looked-up word directly to the deck.
 
+**Note**: In newer KOReader versions (2026.05+), dictionary popup buttons can be
+customized via **Dictionary settings → Customize buttons → Max buttons in row**.
+Increase this value to display multiple plugin buttons on the same row.
+
 ## Credits
 This project was created with assistance from Windsurf (AI).
