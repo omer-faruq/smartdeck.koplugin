@@ -480,6 +480,17 @@ function SmartDeck:init()
             end
         end
     end
+
+    -- Register SmartDeck button with new KOReader dict API (PR #15184+)
+    -- Safe no-op on older versions where addToDictButtons doesn't exist.
+    if self.ui and self.ui.dictionary
+        and type(self.ui.dictionary.addToDictButtons) == "function" then
+        self.ui.dictionary:addToDictButtons({
+            id = "smartdeck_add",
+            text = _("Add to SmartDeck"),
+            callback = self:_buildSmartDeckDictButton(nil).callback,
+        })
+    end
 end
 
 function SmartDeck:onReaderReady()
@@ -498,19 +509,42 @@ function SmartDeck:onReaderReady()
     end
 end
 
+-- Builds the SmartDeck button spec for the dict popup.
+-- Used by both the new addToDictButtons API and the legacy onDictButtonsReady hook.
+function SmartDeck:_buildSmartDeckDictButton(dict_popup_arg)
+    -- dict_popup_arg is either:
+    -- new API: the DictQuickLookup widget instance (passed by KOReader as arg to callback)
+    -- old API: the dict_popup captured as upvalue in onDictButtonsReady
+    return {
+        text = _("Add to SmartDeck"),
+        callback = function(widget_instance)
+            -- In new API, widget_instance is passed. In old API, use upvalue.
+            local popup = widget_instance or dict_popup_arg
+            local word = popup and popup.word
+            self:addFromDictionary(word)
+        end,
+    }
+end
+
 -- Dictionary popup integration. The DictButtonsReady event is fired by
 -- dictquicklookup.lua as it assembles its action rows. `dict_buttons` is a
 -- 2-D array (rows of buttons), so we inject a new row holding the SmartDeck
 -- button just below the built-in row.
 function SmartDeck:onDictButtonsReady(dict_popup, dict_buttons)
     if not dict_popup or type(dict_buttons) ~= "table" then return end
+    -- If new KOReader API is present, we already registered at init() time.
+    -- This hook won't be called on new KOReader anyway, but guard for safety.
+    if self.ui and self.ui.dictionary
+        and type(self.ui.dictionary.addToDictButtons) == "function" then
+        return
+    end
+
+    local btn = self:_buildSmartDeckDictButton(dict_popup)
     local row = { {
         id = "smartdeck_add",
-        text = _("Add to SmartDeck"),
+        text = btn.text,
         font_bold = true,
-        callback = function()
-            self:addFromDictionary(dict_popup.word)
-        end,
+        callback = function() btn.callback(nil) end,
     } }
     local insert_index = #dict_buttons > 1 and 2 or 1
     table.insert(dict_buttons, insert_index, row)
